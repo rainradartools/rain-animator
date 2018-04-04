@@ -1,0 +1,310 @@
+Parameters:
+
+  S3LambdaBucket:
+    Type: String
+    Description: bucket where pre-built lambdas were uploaded to
+
+  S3WorkBucketName:
+    Type: String
+    Description: name for the s3 bucket (in this stack) that will store animations
+
+  RainDataBucket:
+      Type: String
+      Description: name of _existing_ rain data bucket
+
+  ConfigBucket:
+    Type: String
+    Description: name of _existing_ config bucket
+
+Resources:
+
+  LambdaGlobalRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "inline-policy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              -
+                Effect: "Allow"
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource:
+                  - !Sub arn:aws:s3:::${RainDataBucket}
+                  - !Sub arn:aws:s3:::${RainDataBucket}/*
+              -
+                Effect: "Allow"
+                Action:
+                  - s3:*
+                Resource:
+                  - !Sub arn:aws:s3:::${S3Work}
+                  - !Sub arn:aws:s3:::${S3Work}/*
+              -
+                Effect: "Allow"
+                Action:
+                  - s3:*
+                Resource: "*"
+              -
+                Effect: "Allow"
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - !Sub arn:aws:s3:::${ConfigBucket}/*
+              -
+                Effect: "Allow"
+                Action:
+                  - lambda:InvokeFunction
+                Resource: "*"
+              -
+                Effect: "Allow"
+                Action:
+                  - SNS:Publish
+                Resource: "*"
+
+
+  APIGExecuteLambdaRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "apigateway.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "inline-policy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # -
+              #   Effect: "Allow"
+              #   Action:
+              #     - lambda:InvokeFunction
+              #   Resource:
+              #     !GetAtt LambdaAnimation.Arn
+              -
+                Effect: "Allow"
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  !GetAtt LambdaAssistant.Arn
+
+
+  S3Work:
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Ref S3WorkBucketName
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        RoutingRules:
+          - RedirectRule:
+              HttpRedirectCode: 307
+              HostName: !Sub ${APIGateway}.execute-api.${AWS::Region}.amazonaws.com
+              Protocol: https
+              ReplaceKeyPrefixWith: LATEST/animate?key=
+            RoutingRuleCondition:
+              HttpErrorCodeReturnedEquals: 404
+              KeyPrefixEquals: animated/
+      CorsConfiguration:
+        CorsRules:
+          -
+            AllowedMethods: [GET, HEAD]
+            AllowedOrigins: ['*']
+            AllowedHeaders: ['*']
+      LifecycleConfiguration:
+        Rules:
+          -
+            ExpirationInDays: 1
+            Id: "delete merged/ after 1 days"
+            Prefix: merged/
+            Status: Enabled
+          -
+            ExpirationInDays: 1
+            Id: "delete animated/ after 1 days"
+            Prefix: animated/
+            Status: Enabled
+          -
+            ExpirationInDays: 1
+            Id: "delete rain/ after 1 days"
+            Prefix: rain/
+            Status: Enabled
+
+  S3WorkPublicWebsitePolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties:
+      Bucket: !Ref S3Work
+      PolicyDocument:
+        Statement:
+          -
+            Action:
+              - s3:GetObject
+            Effect: "Allow"
+            Resource:
+              !Join [ "", [ "arn:aws:s3:::", !Ref S3Work, "/*"  ] ]
+            Principal: "*"
+          -
+            Action:
+              - s3:ListBucket
+            Effect: "Allow"
+            Resource:
+              !Join [ "", [ "arn:aws:s3:::", !Ref S3Work  ] ]
+            Principal: "*"
+
+  # LambdaAnimation:
+  #   Type: "AWS::Lambda::Function"
+  #   Properties:
+  #     Code:
+  #       S3Bucket: !Ref S3LambdaBucket
+  #       S3Key: apps/animatePlatformBeta/Animation-1.0-SNAPSHOT.jar
+  #     Description: creates animated gif
+  #     FunctionName:
+  #       !Sub ${AWS::StackName}_Animation
+  #     Handler: com.gsat.animation.Handler::handler
+  #     MemorySize: 1536
+  #     Role:
+  #       !GetAtt LambdaGlobalRole.Arn
+  #     Runtime: java8
+  #     Timeout: 120
+  #     Environment:
+  #       Variables:
+  #         defaultImageSize: "512"
+  #         ffmpegCommand: "/tmp/ffmpeg_amzn"
+  #         encryption: "OFF"
+  #         kmsKeyId: "alias/animate-platform-beta"
+
+  LambdaAssistant:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code:
+        S3Bucket: !Ref S3LambdaBucket
+        S3Key: Assistant-1.0-SNAPSHOT.jar
+      Description: creates payload to send to Animation
+      FunctionName:
+        !Sub ${AWS::StackName}_Assistant
+      Handler: com.gsat.assistant.Handler::handler
+      MemorySize: 1536
+      Role:
+        !GetAtt LambdaGlobalRole.Arn
+      Runtime: java8
+      Timeout: 120
+      Environment:
+        Variables:
+          sourceBucket: !Ref RainDataBucket
+          targetBucket: !Ref S3WorkBucketName
+          configBucket: !Ref ConfigBucket
+          radarFactsKey: "radar_facts.json"
+          encryption: "OFF"
+          kmsKeyId: ""
+          maxTimesliceMins: "1440"
+
+  APIGateway:
+    Type: "AWS::ApiGateway::RestApi"
+    Properties:
+      Name:
+        !Join [ "_", [ !Ref "AWS::StackName", APIG ] ]
+
+  APIGDeploymentProd:
+    DependsOn: APIGAssistantPOST
+    Type: "AWS::ApiGateway::Deployment"
+    Properties:
+      RestApiId:
+        !Ref APIGateway
+      StageName: dummystage
+
+  APIGStage:
+    Type: "AWS::ApiGateway::Stage"
+    Properties:
+      DeploymentId: !Ref APIGDeploymentProd
+      RestApiId: !Ref APIGateway
+      StageName: LATEST
+
+  # APIGAnimationResource:
+  #   Type: "AWS::ApiGateway::Resource"
+  #   Properties:
+  #     ParentId:
+  #       !GetAtt APIGateway.RootResourceId
+  #     PathPart: animation
+  #     RestApiId: !Ref APIGateway
+
+  # APIGAnimationPOST:
+  #   Type: AWS::ApiGateway::Method
+  #   Properties:
+  #     AuthorizationType: NONE
+  #     HttpMethod: POST
+  #     ResourceId:
+  #       !Ref APIGAnimationResource
+  #     RestApiId:
+  #       !Ref APIGateway
+  #     Integration:
+  #       Credentials:
+  #         !GetAtt APIGExecuteLambdaRole.Arn
+  #       Type: AWS_PROXY
+  #       IntegrationHttpMethod: POST
+  #       Uri: !Sub
+  #         - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Arn}/invocations
+  #         - Arn:
+  #             Fn::GetAtt:
+  #             - LambdaAnimation
+  #             - Arn
+
+  APIGAssistantResource:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      ParentId:
+        !GetAtt APIGateway.RootResourceId
+      PathPart: assistant
+      RestApiId: !Ref APIGateway
+
+  APIGAssistantPOST:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: AWS_IAM
+      HttpMethod: POST
+      ResourceId:
+        !Ref APIGAssistantResource
+      RestApiId:
+        !Ref APIGateway
+      Integration:
+        Credentials:
+          !GetAtt APIGExecuteLambdaRole.Arn
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Arn}/invocations
+          - Arn:
+              Fn::GetAtt:
+              - LambdaAssistant
+              - Arn
+
+
+
+  
+      
